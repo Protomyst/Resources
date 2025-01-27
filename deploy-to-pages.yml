@@ -1,0 +1,113 @@
+name: Deploy Hugo site to Pages
+
+on:
+  workflow_run:
+    workflows: ["Configure Hugo Settings"]
+    types:
+      - completed
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Setup Hugo
+        uses: peaceiris/actions-hugo@v2
+        with:
+          hugo-version: 'latest'
+          extended: true
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Install PaperMod theme
+        run: |2
+          if [ ! -d "themes/PaperMod" ]; then
+            git submodule add -b master https://github.com/adityatelange/hugo-PaperMod.git themes/PaperMod
+          fi
+
+      - name: Create required pages
+        run: |2
+          # 创建必要的目录
+          mkdir -p content
+
+          # 创建搜索页面
+          cat > content/search.md << 'EOL'
+          ---
+          title: "Search"
+          layout: "search"
+          summary: "search"
+          placeholder: "搜索文章..."
+          ---
+          EOL
+
+          # 创建归档页面
+          cat > content/archives.md << 'EOL'
+          ---
+          title: "Archives"
+          layout: "archives"
+          url: "/archives/"
+          summary: "archives"
+          ---
+          EOL
+
+      - name: Copy and process content
+        run: |2
+          # 复制所有非隐藏文件到 content 目录，排除 README.md
+          find . -type f \
+            ! -path "*/\.*" \
+            ! -path "*/themes/*" \
+            ! -path "*/content/*" \
+            ! -path "*/public/*" \
+            ! -name "README.md" \
+            ! -name "hugo.toml" \
+            -exec cp --parents {} content/ \;
+
+          # 修复 Markdown 文件中的相对引用路径
+          find content -type f -name "*.md" -exec sed -i 's|\./\(images\|img\|assets\)/|../\1/|g' {} +
+          find content -type f -name "*.md" -exec sed -i 's|\./|../|g' {} +
+
+      - name: Use configured hugo.toml
+        run: |2
+          if [ -f ".github/hugo.toml" ]; then
+            cp .github/hugo.toml ./hugo.toml
+          else
+            echo "错误：找不到 hugo.toml 配置文件"
+            exit 1
+          fi
+
+      - name: Build site
+        run: hugo --gc --minify
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

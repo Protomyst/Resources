@@ -1,0 +1,143 @@
+name: Add Front Matter
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  add-front-matter:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up environment
+        run: |
+          # 设置错误处理
+          set -euo pipefail
+          
+          # 创建日志目录
+          mkdir -p .logs
+
+      - name: Process Documents
+        id: process
+        run: |
+          # 创建日志目录
+          mkdir -p .logs
+          
+          # 初始化计数器
+          TOTAL=0
+          PROCESSED=0
+          FAILED=0
+          
+          log() {
+            echo "[$1] $2" | tee -a .logs/process.log
+          }
+          
+          process_file() {
+            local file="$1"
+            local title=$(basename "$file" .md)
+            local utc_date
+            local date
+            local category
+            
+            # 获取最后提交时间
+            utc_date=$(git log -1 --format="%aI" -- "$file" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
+            date=$(TZ='Asia/Shanghai' date -d "$utc_date" +"%Y-%m-%dT%H:%M:%S+08:00")
+            category=$(dirname "$file" | sed 's|^./||')
+            
+            # 检查是否已有 front matter
+            if sed -n '1{/^---$/h}; /^---$/{x;p;q}; H' "$file" | grep -q "^---$"; then
+              log "INFO" "跳过 $file: 已存在 front matter"
+              return 0
+            fi
+            
+            log "INFO" "处理文件: $file"
+            
+            # 检查文件权限
+            if [ ! -w "$file" ]; then
+              log "ERROR" "无法写入文件: $file"
+              return 1
+            fi
+            
+            # 创建临时文件
+            local temp_file
+            temp_file=$(mktemp)
+            
+            # 生成新内容
+            {
+              echo "---"
+              echo "title: \"$title\""
+              echo "date: $date"
+              echo "categories: [\"$category\"]"
+              echo "type: \"post\""
+              echo "---"
+              cat "$file"
+            } > "$temp_file"
+            
+            # 更新文件
+            if mv "$temp_file" "$file"; then
+              log "SUCCESS" "已添加 front matter 到 $file"
+              return 0
+            else
+              rm -f "$temp_file"
+              log "ERROR" "更新文件失败: $file"
+              return 1
+            fi
+          }
+          
+          # 处理所有 markdown 文件
+          while IFS= read -r file; do
+            TOTAL=$((TOTAL + 1))
+            if process_file "$file"; then
+              PROCESSED=$((PROCESSED + 1))
+            else
+              FAILED=$((FAILED + 1))
+            fi
+          done < <(find . -type f -name "*.md" ! -name "README.md")
+          
+          # 输出统计信息
+          {
+            echo "总文件数: $TOTAL"
+            echo "成功处理: $PROCESSED"
+            echo "处理失败: $FAILED"
+          } | tee -a .logs/process.log
+          
+          # 设置 GitHub Actions 输出
+          echo "processed=$PROCESSED" >> "$GITHUB_OUTPUT"
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+      - name: Commit changes
+        if: steps.process.outputs.processed > 0
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # 添加修改的文件和日志
+          git add -A
+          
+          # 如果有更改则提交
+          if ! git diff --quiet --cached; then
+            git commit -m "chore: add front matter to documents
+            
+            处理文件数: ${{ steps.process.outputs.processed }}
+            失败数: ${{ steps.process.outputs.failed }}
+            
+            详细日志请查看 Actions 运行记录"
+            
+            # 推送更改
+            if git push; then
+              echo "成功推送更改到仓库"
+            else
+              echo "推送更改失败"
+              exit 1
+            fi
+          else
+            echo "没有需要提交的更改"
+          fi
